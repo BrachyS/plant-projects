@@ -1,0 +1,372 @@
+---
+title: "Sample R code"
+author: "Shuangshuang Liu"
+date: "7/8/2019"
+output: html_document
+---
+```{r setup, include=FALSE}
+
+library(knitr)
+```
+
+ **This document contains sample R codes from typical analyses I have done for my past research projects. **
+Specifically:
+ (1) Analysis of plant traits (continuous and binomial traits using generalized linear mixed models) from a field trial.
+ (2) Clustering analysis (unsupervised learning) on seed germination traits of 15 desert annual plant species.
+ (3) Visualization of germination niche (Simulated seed germination percentages within a range of environmental conditions)
+ (4) Mapping of introduction routes of invasive plant species worldwide
+ 
+Load required libraries 
+```{r message=FALSE,warning=FALSE}
+set.seed(1234)
+# For data preparation
+library(tidyr)
+library(plyr)
+library(stringr)
+library(tidyverse) 
+
+# For visualization
+library(ggplot2)
+library(cowplot)
+library(gplots)
+library(gridExtra)
+library(lattice) # for wireframe surface plot
+library(maps)
+library(mapplots)
+library(scales)
+
+# For analyses
+library(lme4) # Mixed models
+library(car) # Levene test
+library(cluster) #clustering algorithms
+library(factoextra) #clustering algorithms and visualization
+library(flexclust) #weighted kmeans clustering
+library(akima) #for interpolation of spaced data
+library(network) # for constructing network objects
+library(sna) # for social network analysis
+
+```
+
+# 1. Analysis of plant traits from a field trial
+## Experimental design
+ * This experiment followed a split-plot design with two irrigation levels as main plot treatments.
+ * Each irrigation treatment was applied to five completely randomized blocks containing the subplot treatments. 
+ * Within each block, 72 rows of seeds from 12 populations (6 accessions per population) were sown in a randomized order. Each row contains 10 seeds.
+ * Therefore, a total of 2x5x72x10=7200 seeds were planted.
+ * For each survived individual plant, total biomass and seed biomass were measured (continuous traits)
+ * For each row of 10 plants, percentage of flowered plants,germination and survival were measured (binary traits).
+ 
+
+```{r, echo=FALSE}
+biomass <- read.csv('/Users/Sabrina/Documents/OneDrive/R/Rmarkdown/data_rmarkdown/biomass_logtransformed.csv')
+biomass$Pop <- as.factor(biomass$Pop)
+biomass$Block <- as.factor(biomass$Block)
+biomass$LineID <- as.factor(biomass$LineID)
+```
+ * Dataframe `biomass` has been loaded, which includes log-transformed biomass data
+```{r}
+head(biomass)
+
+pop.mean <- ddply(biomass,.(Water,Block,Pop),numcolwise(mean, na.rm=TRUE)) # Average accessions per population per block, resulting in 2x5x12=120 data points for both traits
+
+```
+
+## ANOVA analysis of continuous traits (whole plant and seed biomass)
+ * Test anova assumptions
+```{r}
+# Normalily
+shapiro.test((pop.mean$whole)) # p<0.05
+shapiro.test((pop.mean$seed)) # p<0.05
+```
+Results of Shapiro-willk test were significant. However, the large sample size(n>30) and high W value (>0.97) which suggested nearly normal distribution of data. We can also visualize the data distribution in Q-Q plot to confirm normality. 
+```{r}
+# qqnorm(pop.mean$whole)
+# qqnorm(pop.mean$seed) 
+```
+
+```{r}
+# Homogeneity of variance
+leveneTest(whole~Pop,data=pop.mean) # Not significant (NS)
+leveneTest(seed~Pop,data=pop.mean)# NS
+```
+
+ * **Full ANOVA model**
+
+```{r}
+# Total biomass
+fit.whole<-aov(whole~Pop*Water+Error(Block),data=pop.mean)
+# Seed biomass
+fit.seed<-aov(seed~Pop*Water+Error(Block),data=pop.mean)
+summary(fit.seed)
+```
+Both total biomass and seed biomass show significant irrigation effects, population effects, and population-by-water interactions
+
+ 
+ * **Within-treatment ANOVA**
+```{r}
+Y<-pop.mean[pop.mean[,"Water"]=="Y",] # Data--with irrigation
+N<-pop.mean[pop.mean[,"Water"]=="N",] # Data--without irrigation
+
+fit.whole.Y <- aov(whole~Pop+Error(Block),data=Y) # p< 0.05
+fit.seed.Y <- aov(seed~Pop+Error(Block),data=Y) #p <0.05
+
+fit.whole.N <- aov(whole~Pop+Error(Block),data=N) # p< 0.05
+fit.seed.N <- aov(seed~Pop+Error(Block),data=N) # p< 0.05
+```
+For both with and without irrigation treatments, both total biomass and seed biomass were significantly affected by the origin of populations
+
+## Analysis of binary trait data 
+```{r , echo=FALSE}
+#data prep
+BinaryTraits<-read.csv("/Users/Sabrina/Documents/OneDrive/R/Rmarkdown/data_rmarkdown/FlowerCount_forR.csv")
+BinaryTraits$LineID<-factor(BinaryTraits$LineID)
+BinaryTraits$Block<-factor(BinaryTraits$Block)
+
+```
+
+**Mixed effects logistic regression models** on binary traits --take flowering as an example
+
+ * Dataframe `BinaryTraits` has been loaded, which includes binary trait data.
+
+```{r}
+head(BinaryTraits)
+flower<-cbind(BinaryTraits$Flowered,BinaryTraits$Survived-BinaryTraits$Flowered)
+head(flower)
+fit.flower <- glmer(flower~Water+Pop+Water:Pop+(1|Block),data=BinaryTraits,family=binomial,,control=glmerControl(optimizer="bobyqa"),nAGQ=10)
+# Second model, removing interaction term
+fit.flower2<-glmer(flower~Water+Pop+(1|Block),data=BinaryTraits,family=binomial,control=glmerControl(optimizer="bobyqa"),nAGQ=10)
+# Third model, removing water effects
+fit.flower3<-glmer(flower~Pop+(1|Block),data=BinaryTraits,family=binomial,control=glmerControl(optimizer="bobyqa"),nAGQ=10)
+
+anova(fit.flower,fit.flower2,test="LRT") 
+```
+Insignificant results. Interaction terms in the first model can be removed
+
+```{r}
+anova(fit.flower2,fit.flower3,test="LRT") 
+```
+Insignificant results. Water effects in the second model can be removed. The third model, fit.flower3 was retained as the final model
+
+```{r}
+summary(fit.flower3)
+```
+
+## Visualize population-by-irrigation interactions
+```{r echo=FALSE}
+biomass_raw=read.csv("~/Documents/*R/0.MyRscript/0.Field_biomassR/fieldbiomass_notlog_withSE.csv")
+biomass_raw$Pop=as.factor(biomass_raw$Pop)
+biomass_raw$var=as.character(biomass_raw$var)
+colnames(biomass_raw)[9] <- "Irrigation"
+
+biomass_raw$var[biomass_raw$var=="c. Above ground biomass"] <- "Above-ground"
+biomass_raw$var[biomass_raw$var=='d. Seed biomass'] <- 'Seed'
+```
+ * Dataframe `biomass_raw` has been loaded, which contains the average biomass data (not log-transformed) for each population-by-irrigation treatment.
+```{r}
+head(biomass_raw)
+dim(biomass_raw)
+
+# Create interaction plot using ggplot
+pd<-position_dodge(width=0.3) 
+bio<-ggplot(data=biomass_raw, aes(x=Irrigation, y=mean,group=pop,linetype=pop,shape=pop))+
+  geom_errorbar(aes(ymin=mean-se,ymax=mean+se),linetype=1,width=0.5,size=0.3,position=pd)+
+  geom_line(position=pd,size=0.3)+
+  geom_point(position=pd,size=2)+
+  scale_shape_manual(values=1:nlevels(biomass_raw$pop))+ 
+  facet_wrap(~var,scales="free_y",ncol=2)+
+  ylab("Biomass (g)")
+
+bio+theme(legend.position="bottom")
+
+```
+
+ **Conclusions: (1) Within each irrigation treatment, origin of populations significantly affect plant biomass trait; Populations also respond to irrigation treatments differently (significant pop-by-water interactions). (2) Population effects were also significant for the binary trait, flowering. (3) We can thus continue to look into performance of specific populations and how other factors (such as environmental variables at origin locations) may play a role. (3) In agriculture, such trait differences among wild populations are potentially important for germplasm selection.**  
+
+
+## 2. Clustering Analysis on germination traits of a group of annual species
+
+```{r echo=FALSE}
+#All field HTT params (0-5.5 months)
+field_all=read.csv('/Users/Sabrina/Documents/OneDrive/R/Rmarkdown/data_rmarkdown/Allparams_field.csv',row.names = 'Species')
+
+# Replace missing values to 99, which will result in close to 0 germination
+field_all[field_all=="-999"]<-99
+```
+
+ * Dataframe `field_all` has been loaded, which includes modeled germination parameters for 15 annual plant species.
+```{r}
+head(field_all)
+
+#Scaling data for kmeans analyses
+field_all_scale=scale(field_all)
+
+#K mean. Try 4 cluseters initially, based on prior data inspection
+k4 = kmeans(field_all_scale,centers=4, nstart = 25)
+k4$cluster
+
+#Visualize 4 clusters
+fviz_cluster(k4,data=field_all_scale,ggtheme = theme_classic())
+
+#Try different number of clusters
+k2 <- kmeans(field_all_scale, centers = 2, nstart = 25)
+k3 <- kmeans(field_all_scale, centers = 3, nstart = 25)
+k5 <- kmeans(field_all_scale, centers = 5, nstart = 25)
+
+# Compare plots of different number of clusters (plots not shown)
+p2 <- fviz_cluster(k2, geom = "point", data = field_all_scale) + ggtitle("k = 2")
+p3 <- fviz_cluster(k3, geom = "point",  data = field_all_scale) + ggtitle("k = 3")
+p4 <- fviz_cluster(k4, geom = "point",  data = field_all_scale) + ggtitle("k = 4")
+p5 <- fviz_cluster(k5, geom = "point",  data = field_all_scale) + ggtitle("k = 5")
+# grid.arrange(p2, p3, p4, p5, nrow = 2)
+
+# Use the "Elbow method" to find optimal number of clusters
+set.seed(123)
+fviz_nbclust(field_all_scale, kmeans, method = "wss") # suggests 4 is the optimal number 
+
+# Use the "Silhouette method" to find optimal number of clusters
+# This method determines how well each object lies within its cluster
+fviz_nbclust(field_all_scale,kmeans,method='silhouette') # suggests 4 is the optimal number (2nd largest following the number 2) 
+
+#Compute summarizing stats for the variables
+groupmeans= field_all %>%
+  mutate(Cluster=k4$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("mean")
+
+```
+
+ **Conclusions: The 15 species can be best grouped into 4 clusters. The first two principal components explained 47.4%+21.4%=68.8% of the variance. Characteristics of each group can be described according to the `groupmeans`. **
+
+
+# 3. Visualization of germination niche
+```{r echo=FALSE}
+nc=read.csv(file="/Users/Sabrina/Documents/OneDrive/R/Rmarkdown/data_rmarkdown/germniche_trial_confirmed011018.csv")
+vuoc=nc[nc$Species=="VUOC.t",]
+drcu=nc[nc$Species=="DRCU",]
+erte=nc[nc$Species=="ERTE",]
+plin=nc[nc$Species=="PLIN",]
+```
+
+ * Example data includes simulated germination percentage of four plant species, across a range of temperatures and water potentials (lower value indicating higher drought stress)
+ * Bellow are sample codes for four species, from more dormant to less dormant: vuoc, drcu, erte, plin
+```{r, echo=TRUE}
+#Check data, take erte as an example
+head(erte)
+```
+
+Generating wireframe surface plot for each species
+```{r, echo=TRUE}
+
+Wvuoc <-  
+  wireframe(vuoc[,4]~vuoc[,1]*vuoc[,2],main="VUOC",zlim=c(0,1),
+          drape = TRUE,screen=list(z=20,x=-70,y=0),
+          ylab=list("WP (MPa)",rot=280,cex=0.5),xlab=list("Temperature (C)",rot=6,cex=0.5),zlab=list("Germination Fraction",rot=92,cex=0.5),
+          scales=list(arrows=FALSE,y=list(distance=1.2),x=list(distance=0.8),z=list(distance=1.2),cex=0.5))
+
+Wdrcu <-  
+  wireframe(drcu[,4]~drcu[,1]*drcu[,2],main="DRCU",zlim=c(0,1),
+          drape = TRUE,screen=list(z=20,x=-70,y=0),
+          ylab=list("WP (MPa)",rot=280,cex=0.5),xlab=list("Temperature (C)",rot=6,cex=0.5),zlab=list("Germination Fraction",rot=92,cex=0.5),
+          scales=list(arrows=FALSE,y=list(distance=1.2),x=list(distance=0.8),z=list(distance=1.2),cex=0.5))
+
+Werte <-  
+  wireframe(erte[,4]~erte[,1]*erte[,2],main="ERTE",zlim=c(0,1),
+          drape = TRUE,screen=list(z=20,x=-70,y=0),
+          ylab=list("WP (MPa)",rot=280,cex=0.5),xlab=list("Temperature (C)",rot=6,cex=0.5),zlab=list("Germination Fraction",rot=92,cex=0.5),
+          scales=list(arrows=FALSE,y=list(distance=1.2),x=list(distance=0.8),z=list(distance=1.2),cex=0.5))
+
+Wplin <-  
+  wireframe(plin[,4]~plin[,1]*plin[,2],main="PLIN",zlim=c(0,1),
+          drape = TRUE,screen=list(z=15,x=-70,y=0),
+          ylab=list("WP (MPa)",rot=280,cex=0.5),xlab=list("Temperature (C)",rot=6,cex=0.5),zlab=list("Germination Fraction",rot=92,cex=0.5),
+          scales=list(arrows=FALSE,y=list(distance=1.2),x=list(distance=0.8),z=list(distance=1.2),cex=0.5))
+
+grid.arrange(Wvuoc,Wdrcu,Werte,Wplin,nrow=2)
+```
+
+# 4. Mapping of introduction routes of invasive plant species worldwide
+The plot generated bellow shows how invasive plant species worldwide travel across countries.
+```{r, echo=FALSE}
+centroids <- read.csv("/Users/Sabrina/Documents/OneDrive/R/Rmarkdown/data_rmarkdown/centroids071019.csv")
+centroids <- centroids[, !(names(centroids) %in% c("X.1","X","UNREGION2","Longitude","Latitude"))]
+
+routes=read.csv("/Users/Sabrina/Documents/OneDrive/R/Rmarkdown/data_rmarkdown/High_freq_routes_340species_052618.csv")
+routes$Native=as.character(routes$Native)
+routes$Alien=as.character(routes$Alien)
+routes=routes[!routes$Alien=="FLK",]
+
+```
+
+ * Dataframe `centroids` has been loaded, which includes the geographic coordinates of the centroids of each country, as well as the number of invasive and native species found in that country
+ * Dataframe `routes` has been loaded, which contains estimated frequencies of invasive species introduction between countries
+
+```{r}
+head(centroids,3)
+head(routes,3) 
+
+routes=routes[,c("Native","Alien","freq")]
+
+# Select high frequency routes (freq>30)
+routes_highfreq <- routes[routes$freq > 30,]
+```
+
+
+Create a network object
+```{r}
+country_network<-network(routes_highfreq,
+                 matrix.type='edgelist',
+                 directed=FALSE,  # this will be an undirected network
+                 ignore.eval=FALSE,  
+                 names.eval='freq'  # names for the edge weights
+)
+
+# attach the appropriate latitute and longitude coordinates
+country_network%v%'LONG'<-sapply(network.vertex.names(country_network),function(name){
+  centroids[centroids$ISO==name,]$LONG
+})
+
+country_network%v%'LAT'<-sapply(network.vertex.names(country_network),function(name){
+  centroids[centroids$ISO==name,]$LAT
+})
+```
+
+
+Plot the network using the country centroids coordinates
+```{r}
+map('world',fill=TRUE,col='#f2f2f2',lwd=0.08,mar=c(1,1,1,0.1))
+plot.network(country_network, 
+             new=FALSE, 
+             # get coordiantes from vertices and pass in as 2-col matrix
+             coord=cbind(country_network%v%'LONG',country_network%v%'LAT'),  
+             # set a semi-transparent edge color
+             edge.col=alpha("black",0.2),
+             # specifiy an edge width scaled as fraction of total co-occurence
+             edge.lwd=country_network%e%'freq'/150,
+             # set the vertex size
+             vertex.cex=0.1,
+             usearrows=FALSE,
+             arrowhead.cex=0.5,
+             vertex.col=FALSE, #color of the connecting points 
+             jitter=FALSE)
+
+# Add pies indicating the percentage of alien and native status
+for (i in 1:nrow(centroids)) {
+  add.pie(z=c(centroids[i,]$perc_alien,centroids[i,]$perc_native),
+          x=centroids[i,]$LONG,y=centroids[i,]$LAT,
+          radius =centroids[i,]$radius,col=c(alpha("orange",0.8),alpha("blue",0.8)),
+          labels="",border=FALSE)
+}
+
+#Add legend
+legend(-180,-20,title=" ",legend=c("% Native Species","% Alien Species"),
+       col=c(alpha("blue",0.8),alpha("orange",0.8)),pch=19,cex=0.8,bty="n")
+
+legend(-180,-38,title=" ",legend=c("High-frequency Introduction Routes"),
+       col=c(alpha("black",0.5)),pch=15,cex=0.8, bty="n")
+
+#dev.print('filename') # If needed to save to file
+```
+
+
+
+
